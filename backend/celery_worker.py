@@ -1,5 +1,6 @@
 from celery import Celery
 from app.config import settings
+from app.tasks.document_tasks import process_document as process_document_impl
 
 celery_app = Celery(
     "openclaims_worker",
@@ -17,6 +18,11 @@ celery_app.conf.update(
 
 
 @celery_app.task(name="process_document")
-def process_document(file_key: str, job_id: str):
-    print(f"Processing document: {file_key}, Job ID: {job_id}")
-    return {"status": "completed", "job_id": job_id, "file_key": file_key}
+def process_document(document_id: str):
+    """
+    Celery task wrapper for document processing
+    
+    Args:
+        document_id: UUID of the document to process
+    """
+    return process_document_impl(document_id)

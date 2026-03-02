@@ -13,6 +13,7 @@ app = FastAPI(
     docs_url="/docs",
     redoc_url=None,  # Disable redoc
     openapi_url="/openapi.json",
+    root_path="/api",  # Tell FastAPI it's behind a reverse proxy at /api
 )
 
 # Configure CORS

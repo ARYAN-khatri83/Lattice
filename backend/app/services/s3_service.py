@@ -1,5 +1,5 @@
 """
-S3 service for handling file uploads
+S3 service for handling file uploads and downloads
 """
 import boto3
 from botocore.exceptions import ClientError
@@ -28,7 +28,7 @@ class S3Service:
         self, 
         file_content: bytes, 
         file_name: str, 
-        patient_id: int,
+        patient_id: str,
         content_type: str = "application/pdf"
     ) -> Optional[str]:
         """
@@ -41,7 +41,7 @@ class S3Service:
             content_type: MIME type of file
             
         Returns:
-            S3 path/key if successful, None otherwise
+            S3 key if successful, None otherwise
         """
         try:
             # Generate S3 key with organized structure
@@ -65,6 +65,30 @@ class S3Service:
             
         except ClientError as e:
             logger.error(f"Failed to upload file to S3: {str(e)}")
+            return None
+    
+    def download_file(self, s3_key: str) -> Optional[bytes]:
+        """
+        Download file from S3
+        
+        Args:
+            s3_key: S3 key/path of the file
+            
+        Returns:
+            File content as bytes if successful, None otherwise
+        """
+        try:
+            logger.info(f"Downloading file from S3: {s3_key}")
+            response = self.s3_client.get_object(
+                Bucket=self.bucket_name,
+                Key=s3_key
+            )
+            file_content = response['Body'].read()
+            logger.info(f"Successfully downloaded file: {len(file_content)} bytes")
+            return file_content
+            
+        except ClientError as e:
+            logger.error(f"Failed to download file from S3: {str(e)}")
             return None
     
     def get_file_url(self, s3_key: str, expiration: int = 3600) -> Optional[str]:

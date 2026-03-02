@@ -5,11 +5,13 @@ from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File,
 from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models.patient import Patient
-from app.models.document import Document
+from app.models.document import Document, DocumentStatus
 from app.schemas import DocumentResponse
 from app.services.s3_service import s3_service
 from app.services.pdf_service import validate_pdf
+from celery_worker import celery_app
 import logging
+import uuid
 
 logger = logging.getLogger(__name__)
 
@@ -18,7 +20,7 @@ router = APIRouter(prefix="/documents", tags=["documents"])
 
 @router.post("/upload", response_model=DocumentResponse, status_code=status.HTTP_201_CREATED)
 async def upload_document(
-    patient_id: int = Form(..., description="Patient ID"),
+    patient_id: str = Form(..., description="Patient UUID"),
     file: UploadFile = File(..., description="PDF file to upload"),
     db: Session = Depends(get_db)
 ):
@@ -30,7 +32,7 @@ async def upload_document(
     - PDF has 0-40 pages
     - Patient exists
     
-    Uploads to S3 and stores metadata in database
+    Uploads to S3, stores metadata in database, and enqueues Celery task for Textract processing
     """
     try:
         # Validate patient exists
@@ -69,35 +71,41 @@ async def upload_document(
             )
         
         # Upload to S3
-        s3_path = s3_service.upload_file(
+        s3_key = s3_service.upload_file(
             file_content=file_content,
             file_name=file.filename,
             patient_id=patient_id,
             content_type="application/pdf"
         )
         
-        if not s3_path:
+        if not s3_key:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail="Failed to upload file to S3"
             )
         
-        # Create database record
+        # Create database record with UUID and initial status
+        document_id = str(uuid.uuid4())
         new_document = Document(
+            id=document_id,
             patient_id=patient_id,
             file_name=file.filename,
-            s3_path=s3_path,
+            s3_key=s3_key,
             file_size=file_size,
-            page_count=page_count
+            page_count=page_count,
+            status=DocumentStatus.UPLOADED
         )
         
         db.add(new_document)
         db.commit()
         db.refresh(new_document)
         
+        # Enqueue Celery task for Textract processing
+        celery_app.send_task("process_document", args=[document_id])
+        
         logger.info(
             f"Uploaded document: {file.filename} ({page_count} pages) "
-            f"for patient {patient_id} (Doc ID: {new_document.id})"
+            f"for patient {patient_id} (Doc ID: {document_id}). Celery task enqueued."
         )
         
         return new_document
@@ -115,7 +123,7 @@ async def upload_document(
 
 @router.get("/{document_id}", response_model=DocumentResponse)
 async def get_document(
-    document_id: int,
+    document_id: str,
     db: Session = Depends(get_db)
 ):
     """Get document information by ID"""
@@ -130,7 +138,7 @@ async def get_document(
 
 @router.get("/patient/{patient_id}", response_model=list[DocumentResponse])
 async def get_patient_documents(
-    patient_id: int,
+    patient_id: str,
     db: Session = Depends(get_db)
 ):
     """Get all documents for a specific patient"""

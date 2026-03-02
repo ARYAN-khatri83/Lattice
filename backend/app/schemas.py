@@ -12,12 +12,12 @@ class PatientCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=255, description="Patient's full name")
     email: EmailStr = Field(..., description="Valid email address")
     username: str = Field(..., min_length=3, max_length=50, description="Unique username")
-    password: str = Field(..., min_length=8, description="Password (min 8 characters)")
+    password: str = Field(..., min_length=8, max_length=72, description="Password (8-72 characters)")
 
 
 class PatientResponse(BaseModel):
     """Schema for patient response"""
-    id: int
+    id: str
     name: str
     email: str
     username: str
@@ -29,17 +29,22 @@ class PatientResponse(BaseModel):
 # Document Schemas
 class DocumentUpload(BaseModel):
     """Schema for document upload (validated after processing)"""
-    patient_id: int = Field(..., gt=0, description="Patient ID")
+    patient_id: str = Field(..., description="Patient UUID")
 
 
 class DocumentResponse(BaseModel):
     """Schema for document response"""
-    id: int
-    patient_id: int
+    id: str
+    patient_id: str
     file_name: str
-    s3_path: str
+    s3_key: str
     file_size: Optional[int]
     page_count: Optional[int]
+    status: str
+    extracted_text: Optional[str] = None
+    extraction_confidence: Optional[float] = None
+    error_message: Optional[str] = None
     uploaded_at: datetime
+    processed_at: Optional[datetime] = None
     
     model_config = ConfigDict(from_attributes=True)

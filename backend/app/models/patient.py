@@ -1,7 +1,7 @@
 """
 Patient model for storing user information
 """
-from sqlalchemy import Column, Integer, String, DateTime, func
+from sqlalchemy import Column, String, DateTime, func
 from sqlalchemy.orm import relationship
 from app.database import Base
 
@@ -10,7 +10,7 @@ class Patient(Base):
     """Patient/User model"""
     __tablename__ = "patients"
 
-    id = Column(Integer, primary_key=True, index=True)
+    id = Column(String, primary_key=True, index=True)  # Changed to String for UUID
     name = Column(String, nullable=False)
     email = Column(String, unique=True, nullable=False, index=True)
     username = Column(String, unique=True, nullable=False, index=True)

@@ -9,6 +9,7 @@ from app.models.patient import Patient
 from app.schemas import PatientCreate, PatientResponse
 from app.services.auth_service import hash_password
 import logging
+import uuid
 
 logger = logging.getLogger(__name__)
 
@@ -46,8 +47,10 @@ async def create_patient(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Username already taken"
             )
-        
-        # Create new patient with hashed password
+         and UUID
+        patient_id = str(uuid.uuid4())
+        new_patient = Patient(
+            id=patient_id,ith hashed password
         new_patient = Patient(
             name=patient_data.name,
             email=patient_data.email,
@@ -80,7 +83,7 @@ async def create_patient(
         )
 
 
-@router.get("/{patient_id}", response_model=PatientResponse)
+@router.get("/{pstrent_id}", response_model=PatientResponse)
 async def get_patient(
     patient_id: int,
     db: Session = Depends(get_db)
