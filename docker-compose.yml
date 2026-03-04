@@ -23,6 +23,8 @@ services:
   redis:
     image: redis:7-alpine
     container_name: openclaims-redis
+    ports:
+      - "6379:6379"  # Expose Redis port
     networks:
       - openclaims-network
     healthcheck:
@@ -84,7 +86,6 @@ services:
         condition: service_started
     networks:
       - openclaims-network
-    # Internal port only - not exposed externally
 
   # Celery Worker
   worker:
@@ -126,6 +127,8 @@ services:
       context: ./frontend
       dockerfile: Dockerfile
     container_name: openclaims-frontend
+    ports:
+      - "5173:5173"  # Expose Vite dev server
     volumes:
       # Mount source code for hot reload
       - ./frontend:/app
@@ -133,21 +136,6 @@ services:
       - /app/node_modules
     environment:
       - NODE_ENV=development
-    networks:
-      - openclaims-network
-    # Internal port only - not exposed externally
-
-  # Nginx Reverse Proxy
-  nginx:
-    image: nginx:alpine
-    container_name: openclaims-nginx
-    ports:
-      - "80:80"
-    volumes:
-      - ./infra/nginx.conf:/etc/nginx/nginx.conf:ro
-    depends_on:
-      - backend
-      - frontend
     networks:
       - openclaims-network
 

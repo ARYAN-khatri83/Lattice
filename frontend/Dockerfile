@@ -16,4 +16,4 @@ COPY . .
 EXPOSE 5173
 
 # Run Vite dev server with host 0.0.0.0 to be accessible from outside container
-CMD ["npm", "run", "dev", "--", "--host", "0.0.0.0"]
+CMD ["sh", "-c", "npm install && npx vite --host 0.0.0.0"]
