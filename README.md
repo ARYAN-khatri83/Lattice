@@ -1,6 +1,6 @@
-# 🏥 OpenClaims Dashboard
+# 🏥 Lattice Dashboard
 
-**OpenClaims** is an intelligent medical document processing system that extracts structured healthcare data from PDFs and builds a comprehensive knowledge graph for patient care analysis. The system uses AI-powered extraction (OpenAI GPT-4o) and graph database technology (Neo4j) to create interconnected healthcare records.
+**Lattice** is an intelligent medical document processing system that extracts structured healthcare data from PDFs and builds a comprehensive knowledge graph for patient care analysis. The system uses AI-powered extraction (OpenAI GPT-4o) and graph database technology (Neo4j) to create interconnected healthcare records.
 
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Python](https://img.shields.io/badge/python-3.11-blue.svg)
@@ -149,7 +149,7 @@ Before you begin, ensure you have the following installed:
 
 ```bash
 git clone <repository-url>
-cd OpenClaims
+cd Lattice
 ```
 
 ### 2. Set Up Environment Variables
@@ -158,9 +158,9 @@ Create a `.env` file in the root directory:
 
 ```bash
 # Database Configuration
-POSTGRES_USER=openclaims
+POSTGRES_USER=Lattice
 POSTGRES_PASSWORD=your_secure_password_here
-POSTGRES_DB=openclaims
+POSTGRES_DB=Lattice
 
 # Neo4j Configuration
 NEO4J_USER=neo4j
@@ -250,13 +250,13 @@ docker compose ps
 Expected output:
 ```
 NAME                    STATUS    PORTS
-openclaims-backend      Up        0.0.0.0:3000->3000/tcp
-openclaims-celery       Up        
-openclaims-db           Up        0.0.0.0:5432->5432/tcp
-openclaims-frontend     Up        0.0.0.0:8000->8000/tcp
-openclaims-neo4j        Up        0.0.0.0:7474->7474/tcp, 0.0.0.0:7687->7687/tcp
-openclaims-nginx        Up        0.0.0.0:80->80/tcp
-openclaims-redis        Up        0.0.0.0:6379->6379/tcp
+Lattice-backend      Up        0.0.0.0:3000->3000/tcp
+Lattice-celery       Up        
+Lattice-db           Up        0.0.0.0:5432->5432/tcp
+Lattice-frontend     Up        0.0.0.0:8000->8000/tcp
+Lattice-neo4j        Up        0.0.0.0:7474->7474/tcp, 0.0.0.0:7687->7687/tcp
+Lattice-nginx        Up        0.0.0.0:80->80/tcp
+Lattice-redis        Up        0.0.0.0:6379->6379/tcp
 ```
 
 ### View Logs
@@ -512,7 +512,7 @@ RETURN p, e, prov
 ## 📁 Project Structure
 
 ```
-OpenClaims/
+Lattice/
 ├── backend/                    # FastAPI Backend
 │   ├── alembic/               # Database migrations
 │   │   └── versions/          # Migration scripts
@@ -617,7 +617,7 @@ celery -A celery_worker worker --loglevel=info
 ### Accessing PostgreSQL
 
 ```bash
-docker compose exec db psql -U openclaims -d openclaims
+docker compose exec db psql -U Lattice -d Lattice
 ```
 
 ### Accessing Neo4j
@@ -761,7 +761,7 @@ For issues, questions, or suggestions:
 
 - 🐛 **Bug Reports**: Open an issue on GitHub
 - 💡 **Feature Requests**: Open an issue with [Feature Request] tag
-- 📧 **Email**: support@openclaims.example.com
+- 📧 **Email**: support@Lattice.example.com
 - 💬 **Discussions**: Use GitHub Discussions
 
 ---
