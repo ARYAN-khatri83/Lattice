@@ -1,0 +1,540 @@
+# 🏥 Lattice / OpenClaims — Complete Interview-Ready Guide
+
+---
+
+## 1. Project Overview
+
+**What it does:** Lattice (also called OpenClaims) is an AI-powered medical document processing system. You upload a clinical PDF (like a hospital discharge summary, insurance claim form, or encounter report), and the system automatically:
+1. Extracts raw text from the PDF using **AWS Textract** (OCR)
+2. Sends that raw text to **OpenAI GPT-4o**, which extracts structured medical entities (patient info, encounters, claims, conditions, hospitals)
+3. Stores the structured data in **PostgreSQL** (as JSON)
+4. Builds a **knowledge graph** in **Neo4j** — connecting patients to their encounters, claims, conditions, and hospitals
+5. Displays everything in a **React dashboard** with an interactive graph visualizer
+
+**What problem it solves:** Medical documents are messy, unstructured PDFs. Hospitals, insurers, and healthcare analysts need this information in a structured, queryable format. Manually reading and entering data from PDFs is slow and error-prone. This system automates the entire pipeline from raw PDF → structured data → searchable knowledge graph.
+
+**Why it exists:** Built for the **AWS AI for Bharat Hackathon** — a competition focused on using AI for Indian healthcare innovation. The goal was to demonstrate how AI + graph databases can create a "longitudinal patient record" from fragmented clinical documents.
+
+---
+
+## 2. Tech Stack & Imports
+
+### Backend
+
+| Library | What it is | Why it's here | What breaks without it |
+|---------|-----------|---------------|----------------------|
+| **FastAPI** | High-performance async Python web framework | Handles all REST API endpoints (upload, list, graph queries). Chosen over Flask/Django for native async support and auto-generated Swagger docs | No API server at all |
+| **SQLAlchemy** | Python ORM (Object-Relational Mapper) | Maps Python classes to PostgreSQL tables so we write Python, not raw SQL | Cannot store/query documents or patients in Postgres |
+| **Alembic** | Database migration tool for SQLAlchemy | Manages schema changes (adding columns, tables) without losing data | Have to manually alter database tables |
+| **Pydantic** | Data validation library | Validates all API inputs/outputs AND validates the structured data GPT-4o returns | Invalid data would silently pass through; no schema enforcement |
+| **pydantic-settings** | Env variable loader for Pydantic | Loads [.env](file:///Users/khatriaryan/Desktop/Lattice/.env) file values into a typed [Settings](file:///Users/khatriaryan/Desktop/Lattice/backend/app/config.py#4-27) object | Config values wouldn't load from environment |
+| **Celery** | Distributed task queue | Runs document processing asynchronously (upload returns immediately, processing happens in background) | Uploads would block the API; user waits minutes per upload |
+| **Redis** | In-memory data store | Acts as the message broker for Celery (holds the "process this document" messages) | Celery can't receive or send tasks |
+| **Neo4j Python Driver** | Official Neo4j database driver | Connects to Neo4j graph database, runs Cypher queries | No knowledge graph functionality |
+| **OpenAI Python SDK** | Official OpenAI API client | Calls GPT-4o for structured medical data extraction | No AI extraction — the core feature breaks |
+| **Boto3** | AWS SDK for Python | Talks to AWS S3 (file storage) and AWS Textract (OCR) | Can't upload files or extract text from PDFs |
+| **LangGraph** | Graph-based orchestration framework (from LangChain team) | Defines the extraction pipeline as a two-node workflow (extract → validate) | Would need to manually chain the LLM call and validation logic |
+| **pypdf** | PDF parsing library | Validates uploaded PDFs and counts pages before processing | Can't verify file is actually a valid PDF |
+| **passlib + bcrypt** | Password hashing library | Hashes patient passwords for the registration system | Passwords stored in plaintext — security vulnerability |
+| **python-multipart** | Multipart form parser | Handles file upload parsing in FastAPI | File uploads won't work (FastAPI can't parse multipart forms) |
+| **psycopg2-binary** | PostgreSQL adapter for Python | The actual driver that SQLAlchemy uses to talk to Postgres | SQLAlchemy can't connect to PostgreSQL |
+| **httpx** | Async HTTP client | Required by the OpenAI SDK for making HTTP requests | OpenAI API calls fail |
+
+### Frontend
+
+| Library | What it is | Why it's here | What breaks without it |
+|---------|-----------|---------------|----------------------|
+| **React 19** | UI component library | Renders the entire dashboard UI | No frontend |
+| **Vite** | Build tool and dev server | Bundles TypeScript/React code, provides hot-reload in development | Can't build or serve the frontend |
+| **TypeScript** | Typed JavaScript | Catches type errors at compile time; makes code self-documenting | No type safety; harder to maintain |
+| **react-router-dom** | Client-side routing | Enables navigation between Dashboard (`/`) and Document Detail (`/documents/:id`) pages | Can't navigate between pages |
+
+### Infrastructure
+
+| Technology | What it is | Why it's here |
+|-----------|-----------|---------------|
+| **Docker + Docker Compose** | Container orchestration | Runs all 7 services (Postgres, Redis, Neo4j, Backend, Worker, Frontend, Nginx) with one command |
+| **PostgreSQL 15** | Relational database | Stores patient accounts and document metadata (including the JSONB structured data) |
+| **Neo4j 5.15** | Graph database | Stores the medical knowledge graph — nodes (Patient, Encounter, Claim, Condition, Hospital) and relationships between them |
+| **Redis 7** | In-memory key-value store | Message broker for Celery task queue |
+| **Nginx** | Reverse proxy | Routes requests to either backend or frontend based on URL path |
+
+---
+
+## 3. Project Structure
+
+```
+Lattice/
+├── .env                         ← Environment variables (API keys, database URLs)
+├── docker-compose.yml           ← Defines all 7 Docker services
+├── README.md                    ← Project documentation
+│
+├── backend/                     ← Python FastAPI application
+│   ├── Dockerfile               ← Builds the backend Docker image
+│   ├── requirements.txt         ← Python dependencies
+│   ├── celery_worker.py         ← Celery entry point (registers the task)
+│   ├── alembic.ini              ← Alembic migration config
+│   ├── alembic/                 ← Database migration scripts
+│   └── app/                     ← Main application code
+│       ├── main.py              ← FastAPI app creation, CORS, startup/shutdown hooks
+│       ├── config.py            ← Settings class (loads env vars via Pydantic)
+│       ├── database.py          ← SQLAlchemy engine, session factory, get_db dependency
+│       ├── models/              ← SQLAlchemy ORM models
+│       │   ├── patient.py       ← Patient table (id, name, email, username, password_hash)
+│       │   └── document.py      ← Document table (id, patient_id, s3_key, status, structured_data JSONB)
+│       ├── schemas/             ← Pydantic validation schemas
+│       │   ├── __init__.py      ← API request/response schemas (PatientCreate, DocumentResponse)
+│       │   └── structured_document.py ← Medical entity schemas (PatientInfo, EncounterInfo, ClaimInfo, etc.)
+│       ├── routes/              ← API endpoint handlers
+│       │   ├── health.py        ← GET /health — simple health check
+│       │   ├── patients.py      ← POST /patients, GET /patients/{id}, GET /patients/{id}/graph
+│       │   └── documents.py     ← POST /documents/upload, GET /documents, GET /documents/{id}/graph
+│       ├── services/            ← Business logic layer
+│       │   ├── auth_service.py  ← Password hashing (bcrypt)
+│       │   ├── s3_service.py    ← S3 file upload/download
+│       │   ├── pdf_service.py   ← PDF validation and page counting
+│       │   ├── textract_service.py ← AWS Textract OCR integration
+│       │   ├── llm_service.py   ← OpenAI GPT-4o structured extraction
+│       │   └── graph_service.py ← Neo4j graph operations (MERGE, MATCH, constraints)
+│       ├── tasks/               ← Celery background task definitions
+│       │   └── document_tasks.py ← The main processing pipeline (Textract → LLM → Graph)
+│       └── workflows/           ← LangGraph workflow definitions
+│           └── medical_extraction_graph.py ← Two-node workflow: extract → validate
+│
+├── frontend/                    ← React + Vite + TypeScript frontend
+│   ├── Dockerfile               ← Builds the frontend Docker image
+│   ├── package.json             ← Node dependencies
+│   ├── vite.config.ts           ← Vite build configuration
+│   ├── index.html               ← HTML entry point
+│   └── src/
+│       ├── main.tsx             ← React entry point, renders <App/>
+│       ├── App.tsx              ← App shell: header, theme toggle, routing
+│       ├── config.ts            ← API URL, TypeScript interfaces mirroring backend schemas
+│       ├── styles.css           ← All CSS (dark/light theme, layout, graph visualization)
+│       └── pages/
+│           ├── DashboardPage.tsx     ← Upload form + document list table with polling
+│           └── DocumentDetailPage.tsx ← Document details + JSON viewer + SVG graph visualization
+│
+├── demo/claims/                 ← Sample PDF files for demo uploads
+└── design-docs/                 ← Design documentation and hackathon materials
+    ├── design.md                ← Detailed system design document
+    ├── pitch.md                 ← Hackathon pitch deck
+    └── requirements.md          ← Feature requirements spec
+```
+
+### How files connect to each other
+
+```
+main.py
+  ├── imports routes/ (health, patients, documents) → registers as API routers
+  ├── imports config.py → reads settings
+  └── imports graph_service → runs Neo4j constraint setup on startup
+
+routes/documents.py
+  ├── imports models/ → queries Document and Patient tables
+  ├── imports s3_service → uploads PDF to S3
+  ├── imports pdf_service → validates PDF
+  ├── imports graph_service → queries Neo4j for graph visualization
+  └── imports celery_worker → enqueues background processing task
+
+celery_worker.py
+  └── imports tasks/document_tasks.py → the actual processing logic
+
+tasks/document_tasks.py
+  ├── imports textract_service → OCR step
+  ├── imports workflows/medical_extraction_graph.py → LLM + validation step
+  └── imports graph_service → Neo4j ingestion step
+
+workflows/medical_extraction_graph.py
+  ├── imports llm_service → calls GPT-4o
+  └── imports schemas/structured_document → Pydantic validation
+```
+
+---
+
+## 4. Core Logic — Step by Step (The Full Data Flow)
+
+Here is what happens from the moment a user uploads a PDF to when they see the knowledge graph. Think of it as a 7-step relay race:
+
+### Step 1: User Uploads a PDF (Frontend → Backend API)
+
+The user goes to the dashboard, enters a Patient ID, picks a PDF file, and clicks "Upload & process". The frontend sends a `POST /documents/upload` request with `multipart/form-data` containing [patient_id](file:///Users/khatriaryan/Desktop/Lattice/backend/app/schemas/structured_document.py#63-69) and [file](file:///Users/khatriaryan/Desktop/Lattice/backend/Dockerfile).
+
+### Step 2: Backend Validates & Stores (API Layer)
+
+[routes/documents.py](file:///Users/khatriaryan/Desktop/Lattice/backend/app/routes/documents.py) handles the upload:
+1. **Checks patient exists** in PostgreSQL (must register a patient first)
+2. **Validates file type** — must be `application/pdf`
+3. **Validates file size** — max 50MB
+4. **Validates PDF structure** — uses `pypdf` to open it; checks it has 1–40 pages
+5. **Uploads to S3** — stores the raw PDF in `patients/{patient_id}/documents/{timestamp}_{filename}`
+6. **Creates DB record** — inserts a row in the [documents](file:///Users/khatriaryan/Desktop/Lattice/backend/app/routes/documents.py#22-53) table with status = `uploaded`
+7. **Enqueues Celery task** — sends [process_document(document_id)](file:///Users/khatriaryan/Desktop/Lattice/backend/celery_worker.py#20-29) to Redis
+
+The API responds immediately with the document record. The heavy processing happens asynchronously.
+
+### Step 3: Celery Worker Picks Up the Task (Background Processing)
+
+The Celery worker (running in a separate container) picks the task from Redis and runs [document_tasks.py → process_document()](file:///Users/khatriaryan/Desktop/Lattice/backend/app/tasks/document_tasks.py):
+1. **Fetches the document** from PostgreSQL
+2. **Updates status → "processing"**
+3. Calls **Textract** to extract text (Step 4)
+4. Calls the **LangGraph workflow** (Step 5)
+5. **Ingests into Neo4j** (Step 6)
+6. **Updates status → "completed"**
+
+### Step 4: AWS Textract Extracts Raw Text (OCR)
+
+[textract_service.py](file:///Users/khatriaryan/Desktop/Lattice/backend/app/services/textract_service.py) calls `detect_document_text` on the S3 object:
+- Textract returns "blocks" — one per detected line of text
+- The service concatenates all LINE blocks into a single text blob
+- It computes the average confidence score across all lines
+- Returns [(extracted_text, confidence, error_message)](file:///Users/khatriaryan/Desktop/Lattice/backend/app/tasks/document_tasks.py#23-28)
+
+### Step 5: LangGraph Workflow — LLM Extraction + Validation
+
+[medical_extraction_graph.py](file:///Users/khatriaryan/Desktop/Lattice/backend/app/workflows/medical_extraction_graph.py) defines a two-node LangGraph workflow:
+
+```
+START → extract_node → validate_node → END
+```
+
+**Node 1: extract_node** — Calls [llm_service.py](file:///Users/khatriaryan/Desktop/Lattice/backend/app/services/llm_service.py):
+- Builds a detailed prompt with the raw text and a strict JSON schema
+- Sends to GPT-4o with `temperature=0` (deterministic) and `response_format=json_object` (forces JSON output)
+- The prompt instructs GPT-4o to extract: patient info, encounter info, claim info, conditions (with ICD codes), and hospital info
+- Parses the JSON response
+
+**Node 2: validate_node** — Uses [structured_document.py](file:///Users/khatriaryan/Desktop/Lattice/backend/app/schemas/structured_document.py):
+- Takes the raw JSON from GPT-4o and validates it against the Pydantic [StructuredMedicalDocument](file:///Users/khatriaryan/Desktop/Lattice/backend/app/schemas/structured_document.py#51-123) schema
+- Ensures required fields ([patient_id](file:///Users/khatriaryan/Desktop/Lattice/backend/app/schemas/structured_document.py#63-69), [encounter_id](file:///Users/khatriaryan/Desktop/Lattice/backend/app/schemas/structured_document.py#70-76), [claim_id](file:///Users/khatriaryan/Desktop/Lattice/backend/app/schemas/structured_document.py#77-83)) are non-empty
+- If validation fails, the error is reported and the document is marked as failed
+
+### Step 6: Neo4j Graph Ingestion
+
+[graph_service.py → ingest_structured_document()](file:///Users/khatriaryan/Desktop/Lattice/backend/app/services/graph_service.py) takes the validated structured data and:
+1. Creates/updates a **Patient** node (using `MERGE` — idempotent upsert)
+2. Creates/updates an **Encounter** node
+3. Links Patient → Encounter via `HAD_ENCOUNTER` relationship
+4. Creates/updates a **Hospital** node and links Encounter → Hospital via `AT_HOSPITAL`
+5. Creates/updates a **Claim** node
+6. Links Encounter → Claim via `GENERATED_CLAIM`
+7. Links Patient → Claim via `FILED`
+8. Creates **Condition** nodes and links Encounter → Condition via `DIAGNOSED_WITH`
+
+All of this happens inside a **single Neo4j transaction** — either all succeed or all roll back.
+
+### Step 7: Frontend Displays Results
+
+The dashboard polls `GET /documents?limit=100` every 5 seconds. When a document's status changes to "completed", the user can click "View results" and navigate to [DocumentDetailPage](file:///Users/khatriaryan/Desktop/Lattice/frontend/src/pages/DocumentDetailPage.tsx), which:
+- Shows document metadata (file name, pages, status, timestamps)
+- **JSON tab**: Displays the structured data as pretty-printed JSON
+- **Graph tab**: Fetches `GET /documents/{id}/graph` and renders an **interactive SVG graph** with color-coded nodes (Patient=red, Encounter=purple, Claim=orange, Condition=cyan, Hospital=yellow)
+
+---
+
+## 5. Key Code Sections (Explained)
+
+### 5.1 The Celery Task Pipeline ([document_tasks.py](file:///Users/khatriaryan/Desktop/Lattice/backend/app/tasks/document_tasks.py#L35-L161))
+
+This is the heart of the application. Here is what the [process_document](file:///Users/khatriaryan/Desktop/Lattice/backend/celery_worker.py#20-29) function does:
+
+```python
+def process_document(document_id: str):
+    db = SessionLocal()                              # Create a fresh DB session
+    try:
+        document = db.query(Document).filter(...)    # Fetch document from Postgres
+        document.status = DocumentStatus.PROCESSING  # Mark as "processing"
+        db.commit()
+
+        # Step 1: OCR via Textract
+        extracted_text, confidence, error_msg = textract_service.extract_text_from_s3(
+            s3_key=document.s3_key
+        )
+        if error_msg:                                # If Textract failed...
+            document.status = DocumentStatus.FAILED
+            document.error_message = f"Textract failed: {error_msg}"
+            db.commit()
+            return                                   # ...stop here
+
+        # Save the raw text to Postgres
+        document.extracted_text = extracted_text
+        db.commit()
+
+        # Step 2: LLM extraction via LangGraph workflow
+        structured_data, extraction_error = run_extraction_workflow(extracted_text)
+        if extraction_error:                         # If GPT-4o/validation failed...
+            document.status = DocumentStatus.FAILED
+            document.error_message = extraction_error
+            db.commit()
+            return
+
+        # Save structured data (JSONB column in Postgres)
+        document.structured_data = structured_data
+        db.commit()
+
+        # Step 3: Neo4j graph ingestion (non-blocking failure)
+        try:
+            structured_doc = StructuredMedicalDocument(**structured_data)
+            graph_service.ingest_structured_document(structured_doc)
+        except Exception:
+            pass  # Log error but DON'T fail the whole task
+
+        # Mark as completed
+        document.status = DocumentStatus.COMPLETED
+        document.processed_at = datetime.utcnow()
+        db.commit()
+
+    except Exception as e:
+        # "Catch-all" error handler — marks document as failed
+        document.status = DocumentStatus.FAILED
+        document.error_message = str(e)
+        db.commit()
+    finally:
+        db.close()                                   # Always close the DB session
+```
+
+**Key insight:** Neo4j graph ingestion is treated as a "best-effort" step. If it fails, the document is still marked as "completed" because the structured data is already safely stored in PostgreSQL. This is a deliberate design decision — the graph is a secondary output.
+
+---
+
+### 5.2 The LLM Prompt ([llm_service.py](file:///Users/khatriaryan/Desktop/Lattice/backend/app/services/llm_service.py#L75-L140))
+
+The prompt is carefully engineered with these rules:
+- **"Return ONLY valid JSON, no commentary"** — prevents GPT from adding explanations
+- **"Do NOT hallucinate or infer ICD codes"** — only extract what's explicitly in the document
+- **"Do NOT assume chronic conditions"** — only mark `chronic: true` if the document says so
+- **"All dates MUST be in ISO format YYYY-MM-DD"** — ensures parseable dates
+- **Temperature = 0** — makes the output deterministic (same input → same output)
+- **`response_format={"type": "json_object"}`** — OpenAI's built-in JSON mode, forces valid JSON output
+
+---
+
+### 5.3 Neo4j MERGE Pattern ([graph_service.py](file:///Users/khatriaryan/Desktop/Lattice/backend/app/services/graph_service.py#L142-L286))
+
+Every entity uses `MERGE` instead of `CREATE`. In Cypher:
+- `CREATE` always makes a new node (duplicates if run twice)
+- `MERGE` is an "upsert" — creates if not found, updates if found
+
+```cypher
+MERGE (p:Patient {patient_id: $patient_id})
+ON CREATE SET p.name = $name, p.created_at = datetime()
+ON MATCH SET p.name = COALESCE($name, p.name), p.updated_at = datetime()
+```
+
+This means uploading **multiple documents for the same patient** builds up the graph over time — new encounters and claims get added as new nodes, while patient info gets updated with any new information. The `COALESCE` function means "use the new value if provided, otherwise keep the old one."
+
+---
+
+### 5.4 Frontend Polling ([DashboardPage.tsx](file:///Users/khatriaryan/Desktop/Lattice/frontend/src/pages/DashboardPage.tsx#L57-L92))
+
+```tsx
+useEffect(() => {
+  const loadDocuments = async () => {
+    const resp = await fetch(`${API_BASE_URL}/documents?limit=100&offset=0`);
+    const data = await resp.json();
+    setDocuments(data);
+  };
+
+  loadDocuments();                                     // Load immediately
+
+  if (polling) {
+    timer = window.setInterval(loadDocuments, 5000);   // Then every 5 seconds
+  }
+
+  return () => window.clearInterval(timer);            // Cleanup on unmount
+}, [polling]);
+```
+
+This is how the UI shows real-time progress without WebSockets. The dashboard re-fetches the document list every 5 seconds so users see status changes from "uploaded" → "processing" → "completed" without refreshing.
+
+---
+
+### 5.5 SVG Graph Visualization ([DocumentDetailPage.tsx](file:///Users/khatriaryan/Desktop/Lattice/frontend/src/pages/DocumentDetailPage.tsx#L281-L427))
+
+The graph is rendered as a pure SVG — **no graph library** (like D3 or Cytoscape). Nodes are positioned in a simple layered layout:
+- **Patient** at left (x=80)
+- **Encounters** and **Conditions** in the middle (x=260)
+- **Claims** and **Hospitals** on the right (x=440)
+
+Each node is a colored circle with a label. Clicking a node opens an overlay card showing all properties. Relationships are drawn as lines with arrowheads.
+
+---
+
+## 6. Fallbacks, Error Handling & Edge Cases
+
+### Upload Validation Chain
+1. **Patient not found** → 404 error with clear message
+2. **Not a PDF** → 400 error ("Only PDF files are allowed")
+3. **File too large** (>50MB) → 400 error
+4. **Invalid/corrupt PDF** → 400 error (pypdf can't parse it)
+5. **S3 upload fails** → 500 error
+
+### Processing Error Cascade
+| Step | What can fail | What happens |
+|------|--------------|-------------|
+| Textract | S3 object not found, access denied, API error | Document marked `FAILED` with specific error message |
+| GPT-4o | API error, returned invalid JSON, rate limit | Document marked `FAILED` |
+| Pydantic validation | Missing required fields (patient_id, encounter_id, claim_id) | Document marked `FAILED` |
+| Neo4j ingestion | Connection lost, constraint violation | **Logged but NOT treated as failure** — document still marked `COMPLETED` |
+| Unexpected error | Any unhandled exception | Caught by outer try/except, document marked `FAILED` |
+
+### Key Safety Nets
+- **Neo4j graceful degradation:** If Neo4j is down during startup, the app still starts (logs a warning). If Neo4j fails during ingestion, the structured data is still in Postgres.
+- **DB session cleanup:** The `finally: db.close()` ensures database connections are always returned to the pool, even if processing crashes.
+- **JSON extraction fallback:** The LLM service strips markdown code fences (` ```json `) from GPT responses, in case the model wraps its JSON output.
+- **CORS wildcard:** `allow_origins=["*"]` — allows any frontend origin to call the API. Appropriate for development/demo but would be restricted in production.
+
+---
+
+## 7. Design Decisions & The "Why"
+
+### Why Celery + Redis instead of processing synchronously?
+**Problem:** AWS Textract + GPT-4o can take 10–30 seconds combined. If we processed in the API request handler, the user's browser would hang for that long.
+**Solution:** Return immediately with status "uploaded", then process in the background. The frontend polls to check progress.
+
+### Why Neo4j (graph database) alongside PostgreSQL?
+**Problem:** Healthcare data is inherently relational — patients have encounters, encounters generate claims, claims cover conditions, encounters happen at hospitals. Querying these multi-hop relationships in SQL requires complex JOINs.
+**Solution:** Neo4j makes relationship queries natural. "Show me all conditions for all encounters of patient X" is a simple graph traversal, not a 4-table JOIN.
+
+### Why LangGraph for the extraction workflow?
+**Problem:** The extraction pipeline has distinct stages (LLM extraction → validation) that could grow more complex later (retry logic, human review, branching).
+**Solution:** LangGraph makes it a visual, extensible graph. Adding a retry node or a fallback model is just adding a new node and edge. It's future-proofing.
+
+### Why `MERGE` instead of `CREATE` in Neo4j?
+**Problem:** Multiple documents might mention the same patient, hospital, or condition. Using `CREATE` would make duplicates.
+**Solution:** `MERGE` is idempotent — it finds-or-creates. Upload 10 documents for the same patient, and you get one Patient node connected to 10 Encounters.
+
+### Why store structured data as JSONB in PostgreSQL?
+**Problem:** The structured data schema might evolve. If we created separate tables for patients, encounters, claims, conditions, we'd need migrations every time the schema changes.
+**Solution:** JSONB stores the entire structured document as flexible JSON. No schema changes needed when we add new fields. The "source of truth" relational structure lives in Neo4j.
+
+### Why no authentication/JWT on the API?
+**Design choice:** This is a hackathon prototype / demo. There's a password hashing service ([auth_service.py](file:///Users/khatriaryan/Desktop/Lattice/backend/app/services/auth_service.py)) and a patient registration endpoint, but no actual login/JWT/session system. The password is hashed but never verified in any route. This would be Phase 2.
+
+### Why Vite + React instead of Next.js?
+The README mentions Next.js, but the actual implementation uses **Vite + React** — a simpler, faster setup for a single-page application. Next.js was likely in the original plan but Vite was chosen for faster iteration during the hackathon. No server-side rendering was needed since the frontend is purely a client-side dashboard.
+
+### Why custom SVG instead of a graph library?
+For a hackathon demo, a simple layered SVG layout was faster to implement than integrating D3.js or Cytoscape. The trade-off is that the layout is static (nodes have fixed positions) rather than using force-directed physics.
+
+---
+
+## 8. How the Pieces Connect
+
+```
+┌──────────────────────────────────────────────────────────────────────┐
+│                        USER'S BROWSER                                 │
+│                                                                       │
+│   DashboardPage ──→ POST /documents/upload (with FormData)            │
+│                 ──→ GET /documents (polls every 5 sec)                 │
+│                                                                       │
+│   DocumentDetailPage ──→ GET /documents/{id}                          │
+│                       ──→ GET /documents/{id}/graph                   │
+└───────────────────────────────┬──────────────────────────────────────┘
+                                │ HTTP
+                                ▼
+┌───────────────────────────────────────────────────────────────────────┐
+│                      FastAPI BACKEND (port 8000)                       │
+│                                                                        │
+│   routes/documents.py                                                  │
+│     upload_document():                                                 │
+│       1. Validate patient exists ──→ PostgreSQL (patients table)       │
+│       2. Validate PDF ──→ pdf_service.validate_pdf()                   │
+│       3. Upload to S3 ──→ s3_service.upload_file()                     │
+│       4. Insert DB row ──→ PostgreSQL (documents table)                │
+│       5. Enqueue task  ──→ Redis (via Celery)                          │
+│                                                                        │
+│     get_document_graph():                                              │
+│       1. Fetch structured_data from PostgreSQL                         │
+│       2. Extract patient_id from structured_data                       │
+│       3. Query Neo4j for the patient's subgraph                        │
+│       4. Format nodes + relationships for frontend                     │
+└───────┬───────────────────────────────────────────────────────────────┘
+        │ sends task message
+        ▼
+┌───────────────────────────────────────────────────────────────────────┐
+│                     Redis (port 6379)                                   │
+│                     (Celery Message Broker)                             │
+└───────┬───────────────────────────────────────────────────────────────┘
+        │ worker consumes task
+        ▼
+┌───────────────────────────────────────────────────────────────────────┐
+│                  CELERY WORKER (separate container)                     │
+│                                                                        │
+│   celery_worker.py → document_tasks.py → process_document()            │
+│                                                                        │
+│   Step A: textract_service ──→ AWS Textract API ──→ raw text           │
+│   Step B: medical_extraction_graph.py                                  │
+│           ├── extract_node ──→ llm_service ──→ OpenAI GPT-4o API       │
+│           └── validate_node ──→ Pydantic StructuredMedicalDocument     │
+│   Step C: graph_service ──→ Neo4j (MERGE nodes + relationships)        │
+│   Step D: Update PostgreSQL (structured_data, status=completed)        │
+└───────────────────────────────────────────────────────────────────────┘
+
+┌──────────────┐  ┌──────────────┐  ┌──────────────┐  ┌───────────┐
+│  PostgreSQL  │  │    Neo4j     │  │   AWS S3     │  │  AWS      │
+│  (port 5433) │  │  (port 7687) │  │  (cloud)     │  │ Textract  │
+│              │  │              │  │              │  │  (cloud)  │
+│ patients     │  │ (:Patient)   │  │ PDF files    │  │  OCR API  │
+│ documents    │  │ (:Encounter) │  │              │  │           │
+│ (JSONB data) │  │ (:Claim)     │  │              │  │           │
+│              │  │ (:Condition) │  │              │  │           │
+│              │  │ (:Hospital)  │  │              │  │           │
+└──────────────┘  └──────────────┘  └──────────────┘  └───────────┘
+```
+
+---
+
+## 9. Potential Interview Questions & Answers
+
+### Q1: "Walk me through what happens when a user uploads a document."
+**A:** "The frontend sends a POST request with the PDF and patient ID. The backend validates the file (checks it's a valid PDF, under 50MB, under 40 pages), uploads it to S3, creates a database record in PostgreSQL with status 'uploaded', and immediately enqueues a background processing task via Celery + Redis. The user gets an instant response while the heavy lifting happens asynchronously. The Celery worker then runs a three-stage pipeline: first, AWS Textract extracts raw text from the PDF in S3; second, a LangGraph workflow sends that text to GPT-4o with a carefully crafted prompt that returns structured JSON, which is then validated against a Pydantic schema; third, the validated data is ingested into Neo4j as interconnected graph nodes. The frontend polls every 5 seconds and shows the status change from 'processing' to 'completed.'"
+
+### Q2: "Why did you use both PostgreSQL and Neo4j?"
+**A:** "They serve different purposes. PostgreSQL stores transactional data — user accounts, document metadata, processing status, and the raw structured JSON. It's the 'system of record.' Neo4j stores the medical knowledge graph — the relationships between patients, encounters, claims, conditions, and hospitals. Graph databases excel at multi-hop traversal queries that would require complex joins in SQL. For example, 'find all conditions across all encounters for a patient' is a simple two-hop traversal in Neo4j but a multi-table JOIN in SQL."
+
+### Q3: "Why did you choose Celery for background processing?"
+**A:** "Document processing involves two slow API calls — Textract OCR and GPT-4o extraction — which can take 10–30 seconds total. If we did this synchronously in the API handler, the user's request would timeout or they'd stare at a loading spinner. Celery lets the API return immediately, and the heavy processing happens in a separate worker container. Celery also gives us retry logic, monitoring, and the ability to scale workers independently."
+
+### Q4: "Why LangGraph instead of just calling OpenAI directly?"
+**A:** "We could have called OpenAI directly, and in fact that's what happens under the hood. But LangGraph wraps it in a structured workflow — an 'extract' node followed by a 'validate' node. This separation of concerns makes the pipeline extensible: we could add a retry node, a human-in-the-loop review step, or a fallback model without rewriting the extraction logic. It's an investment in maintainability, and it demonstrates architectural thinking."
+
+### Q5: "What happens if GPT-4o returns invalid data?"
+**A:** "There are two layers of defense. First, the OpenAI API call uses `response_format: json_object`, which guarantees valid JSON syntax. Second, the validate node runs Pydantic validation against the [StructuredMedicalDocument](file:///Users/khatriaryan/Desktop/Lattice/backend/app/schemas/structured_document.py#51-123) schema, which checks that required fields like patient_id, encounter_id, and claim_id are present and non-empty. If validation fails, the document is marked as 'failed' with a descriptive error message, and the user can see what went wrong."
+
+### Q6: "How does the knowledge graph handle duplicate data?"
+**A:** "Every graph operation uses Neo4j's MERGE command instead of CREATE. MERGE is an idempotent upsert — it finds an existing node by its unique key, or creates a new one. So if you upload 10 documents for the same patient, you get one Patient node with 10 Encounter nodes connected to it. The same logic applies to hospitals and conditions — the graph grows wider, not taller. We also have unique constraints on patient_id, encounter_id, and claim_id to enforce this at the database level."
+
+### Q7: "Why did you store structured data as JSONB in PostgreSQL instead of separate tables?"
+**A:** "Two reasons. First, schema flexibility — the structured output from GPT-4o might evolve (new fields, different entity types), and JSONB accommodates that without schema migrations. Second, the structured data is primarily consumed as a single document (displayed as JSON in the frontend). The relational structure lives in Neo4j, where it's actually used for querying relationships. PostgreSQL is the reliable 'storage layer,' Neo4j is the 'query layer' for graph operations."
+
+### Q8: "What's your error handling strategy?"
+**A:** "Defensive and hierarchical. At the API level, we validate inputs aggressively — file type, file size, PDF integrity, patient existence — before anything expensive happens. During processing, failures at each stage (Textract, LLM, validation) short-circuit the pipeline with specific error messages. Neo4j ingestion is treated as 'best effort' — if it fails, the document is still marked as completed because the structured data is safely in PostgreSQL. There's also a catch-all exception handler that marks the document as failed and logs the full stack trace."
+
+### Q9: "How does the frontend show real-time processing status?"
+**A:** "Polling. The dashboard page re-fetches the document list every 5 seconds via `setInterval`. I chose polling over WebSockets because it's simpler to implement and debug, the update frequency (5 seconds) is perfectly adequate for our use case, and it doesn't require maintaining persistent connections. The polling can be paused/resumed with a button. In a production system with many concurrent users, I'd consider WebSockets or Server-Sent Events."
+
+### Q10: "Tell me about the graph visualization."
+**A:** "I built a custom SVG-based graph visualization without any third-party graph library. Nodes are positioned in a layered layout — Patient on the left, Encounters and Conditions in the middle, Claims and Hospitals on the right. Each node type has a distinct color. Clicking a node opens an overlay card showing all its properties. Relationships are drawn as lines with arrowhead markers. The trade-off is that the layout is deterministic (not physics-based), but for a demo with a small number of nodes per patient, it works well and loads instantly."
+
+### Q11: "How would you scale this system?"
+**A:** "Several directions. First, Celery workers can be horizontally scaled — just add more worker containers to handle more documents in parallel. Second, for very large PDFs, I'd switch from Textract's synchronous `detect_document_text` to the asynchronous `start_document_text_detection` API. Third, I'd add caching (Redis) for the graph queries, which are currently computed on every request. Fourth, for production, I'd add JWT authentication, rate limiting, and Nginx configured as a proper load balancer. Fifth, Neo4j can be clustered for read replicas."
+
+### Q12: "Why is there a Patient model with password hashing but no login system?"
+**A:** "This was a hackathon project built in a time-constrained environment. I built the registration infrastructure (password hashing with bcrypt, patient creation endpoint) but focused my time on the core AI pipeline — PDF extraction, LLM structuring, and graph building — which was the differentiator for the hackathon. Authentication would be a straightforward Phase 2 addition using JWT tokens."
+
+### Q13: "What's the prompt engineering strategy?"
+**A:** "The prompt has several deliberate design choices: (1) It uses a system message that sets the role as 'medical information extraction system.' (2) The user message includes explicit rules like 'do NOT hallucinate ICD codes' and 'do NOT assume chronic conditions' to prevent the model from inventing data. (3) It provides the exact JSON schema as a template. (4) Temperature is set to 0 for deterministic output. (5) We use OpenAI's JSON mode (`response_format: json_object`) to guarantee syntactically valid JSON. (6) There's fallback parsing that strips markdown fences in case the model wraps its output."
+
+### Q14: "Explain the Docker Compose setup."
+**A:** "Docker Compose orchestrates 6 services (7 in the README but Nginx isn't in the actual compose file). PostgreSQL, Redis, and Neo4j are infrastructure services with health checks and volume mounts for persistence. The backend and worker share the same Docker image (same Dockerfile) but differ in their start command — the backend runs `uvicorn`, the worker runs `celery worker`. The frontend runs Vite's dev server with a volume mount for hot-reload. Services declare dependencies so Postgres and Redis must be healthy before the backend starts."
+
+### Q15: "What would you do differently in a production version?"
+**A:** "Five things: (1) Add proper authentication with JWT and role-based access control. (2) Replace polling with WebSockets or SSE for real-time updates. (3) Add document type detection — different prompts for EOBs vs. discharge summaries vs. lab reports. (4) Use Textract's async API for large documents and add proper retry logic with exponential backoff. (5) Add a proper CI/CD pipeline, test suite, and monitoring (structured logging, metrics, alerting)."
+
+---
+
+## 10. Summary (Elevator Pitch)
+
+> "I built **Lattice**, an AI-powered system that turns unstructured medical PDFs into structured, queryable healthcare data. When a user uploads a clinical document, the system uses **AWS Textract** for OCR and **GPT-4o** for intelligent entity extraction — pulling out patient info, diagnoses, insurance claims, and hospital details — all with strict validation to prevent hallucinations. The structured data is stored in **PostgreSQL** and automatically ingested into a **Neo4j knowledge graph** that maps relationships between patients, encounters, conditions, and providers. The whole pipeline runs asynchronously using **Celery + Redis**, so the FastAPI backend responds instantly while processing happens in the background. The React frontend provides a dashboard with real-time status polling and an interactive graph visualization. I built it for a healthcare AI hackathon to demonstrate how modern AI and graph databases can solve the problem of fragmented medical records."
